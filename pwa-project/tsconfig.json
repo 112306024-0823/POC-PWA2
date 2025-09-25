@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "jsx": "preserve",
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node", "vite/client", "@quasar/app-vite"],
+    "baseUrl": ".",
+    "paths": {
+      "src": ["./src"],
+      "src/*": ["./src/*"],
+      "app": ["."],
+      "app/*": ["./*"],
+      "components": ["./src/components"],
+      "components/*": ["./src/components/*"],
+      "layouts": ["./src/layouts"],
+      "layouts/*": ["./src/layouts/*"],
+      "pages": ["./src/pages"],
+      "pages/*": ["./src/pages/*"],
+      "assets": ["./src/assets"],
+      "assets/*": ["./src/assets/*"],
+      "boot": ["./src/boot"],
+      "boot/*": ["./src/boot/*"],
+      "stores": ["./src/stores"],
+      "#q-app": ["./node_modules/@quasar/app-vite/types/index.d.ts"],
+      "#q-app/wrappers": ["./node_modules/@quasar/app-vite/types/app-wrappers.d.ts"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.tsx",
+    "src/**/*.vue"
+  ]
+}
