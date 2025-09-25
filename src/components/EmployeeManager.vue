@@ -142,7 +142,7 @@
 
         <q-card-section class="q-pt-none dialog-main">
           <div class="row q-gutter-sm">
-            <div class="col-12 col-sm-6">
+            <div class="col-12 col-md-3">
               <q-input
                 v-model="currentEmployee.FirstName"
                 label="名 *"
@@ -151,7 +151,7 @@
                 :rules="[val => !!val || '必填欄位']"
               />
             </div>
-            <div class="col-12 col-sm-6">
+            <div class="col-12 col-md-3">
               <q-input
                 v-model="currentEmployee.LastName"
                 label="姓 *"
@@ -163,7 +163,7 @@
           </div>
 
           <div class="row q-gutter-sm q-mt-sm">
-            <div class="col-12 col-sm-6">
+            <div class="col-12 col-md-5">
               <q-input
                 v-model="currentEmployee.Department"
                 label="部門"
@@ -171,7 +171,7 @@
                 dense
               />
             </div>
-            <div class="col-12 col-sm-6">
+            <div class="col-12 col-md-5">
               <q-input
                 v-model="currentEmployee.Position"
                 label="職位"
@@ -182,7 +182,7 @@
           </div>
 
           <div class="row q-gutter-sm q-mt-sm">
-            <div class="col-12 col-sm-6">
+            <div class="col-12 col-md-5">
               <q-input
                 v-model="currentEmployee.Email"
                 label="電子郵件"
@@ -191,7 +191,7 @@
                 dense
               />
             </div>
-            <div class="col-12 col-sm-6">
+            <div class="col-12 col-md-5">
               <q-input
                 v-model="currentEmployee.PhoneNumber"
                 label="電話號碼"
@@ -202,7 +202,7 @@
           </div>
 
           <div class="row q-gutter-sm q-mt-sm">
-            <div class="col-12 col-sm-6">
+            <div class="col-12 col-md-5">
               <q-select
                 v-model="currentEmployee.Gender"
                 :options="genderOptions"
@@ -216,7 +216,7 @@
                 clearable
               />
             </div>
-            <div class="col-12 col-sm-6">
+            <div class="col-12 col-md-5">
               <q-select
                 v-model="currentEmployee.Status"
                 :options="statusOptions"
@@ -232,7 +232,7 @@
           </div>
 
           <div class="row q-gutter-sm q-mt-sm">
-            <div class="col-12 col-sm-6">
+            <div class="col-12 col-md-5">
               <q-input
                 v-model="currentEmployee.HireDate"
                 label="到職日期"
@@ -241,7 +241,7 @@
                 dense
               />
             </div>
-            <div class="col-12 col-sm-6">
+            <div class="col-12 col-md-5">
               <q-input
                 v-model="currentEmployee.BirthDate"
                 label="生日"
