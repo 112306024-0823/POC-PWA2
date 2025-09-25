@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
-const sql = require('mssql');
+const { createClient } = require('@supabase/supabase-js');
 const Automerge = require('@automerge/automerge');
 const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
@@ -28,24 +28,13 @@ app.get('/', (req, res) => {
   res.type('text/plain').send('Employee API is running. Use /api/health');
 });
 
-// 資料庫配置 (從.env檔案讀取)
-const dbConfig = {
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  server: process.env.DB_SERVER,
-  port: parseInt(process.env.DB_PORT, 10),
-  database: process.env.DB_DATABASE,
-  options: {
-    encrypt: true,
-    trustServerCertificate: true,
-    enableArithAbort: true,
-  },
-  pool: {
-    max: 10,
-    min: 0,
-    idleTimeoutMillis: 30000,
-  },
-};
+// Supabase 設定 (從.env檔案讀取)
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const EMP_TABLE = process.env.EMP_TABLE || 'employee';
+
+/** @type {import('@supabase/supabase-js').SupabaseClient | null} */
+let supabase = null;
 
 // 全域變數存儲 CRDT 文檔（在生產環境中應該使用持久化存儲）
 let currentDocument = Automerge.init();
@@ -111,10 +100,11 @@ currentDocument = Automerge.change(currentDocument, doc => {
 // 連接資料庫
 async function connectDB() {
   try {
-    await sql.connect(dbConfig);
-    console.log('Connected to SQL Server database');
-    
-    // 載入現有資料到 CRDT 文檔
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+    }
+    supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+    console.log('Connected to Supabase');
     await loadExistingData();
   } catch (err) {
     console.error('Database connection failed:', err);
@@ -124,79 +114,59 @@ async function connectDB() {
 // 載入現有資料到 CRDT 文檔
 async function loadExistingData() {
   try {
-    const result = await sql.query(`
-      SELECT EmployeeID, FirstName, LastName, Department, Position, 
-             HireDate, BirthDate, Gender, Email, PhoneNumber, Address, Status
-      FROM [POC].[dbo].[Employee]
-    `);
-    
+    const { data, error } = await supabase
+      .from(EMP_TABLE)
+      .select('employee_id, first_name, last_name, department, position, hire_date, birth_date, gender, email, phone_number, address, status');
+    if (error) throw error;
+
     currentDocument = Automerge.change(currentDocument, doc => {
-      result.recordset.forEach(emp => {
-        doc.employees[emp.EmployeeID] = {
-          EmployeeID: emp.EmployeeID,
-          FirstName: emp.FirstName || '',
-          LastName: emp.LastName || '',
-          Department: emp.Department || '',
-          Position: emp.Position || '',
-          HireDate: emp.HireDate ? emp.HireDate.toISOString().split('T')[0] : '',
-          BirthDate: emp.BirthDate ? emp.BirthDate.toISOString().split('T')[0] : '',
-          Gender: emp.Gender || '',
-          Email: emp.Email || '',
-          PhoneNumber: emp.PhoneNumber || '',
-          Address: emp.Address || '',
-          Status: (function(){
-            const s = (emp.Status || '').toString();
-            if (!s) return 'Active';
-            if (s === '在職') return 'Active';
-            if (s === '離職') return 'Inactive';
-            return s;
-          })()
+      (data || []).forEach(row => {
+        doc.employees[row.employee_id] = {
+          EmployeeID: row.employee_id,
+          FirstName: row.first_name || '',
+          LastName: row.last_name || '',
+          Department: row.department || '',
+          Position: row.position || '',
+          HireDate: row.hire_date ? new Date(row.hire_date).toISOString().split('T')[0] : '',
+          BirthDate: row.birth_date ? new Date(row.birth_date).toISOString().split('T')[0] : '',
+          Gender: row.gender || '',
+          Email: row.email || '',
+          PhoneNumber: row.phone_number || '',
+          Address: row.address || '',
+          Status: row.status || 'Active'
         };
       });
       doc.lastModified = Date.now();
     });
-    
-    console.log(`Loaded ${result.recordset.length} employees into CRDT document`);
+
+    console.log(`Loaded ${Array.isArray(data) ? data.length : 0} employees into CRDT document`);
   } catch (err) {
     console.error('Failed to load existing data:', err);
   }
 }
 
-// 將 CRDT 文檔同步到資料庫
 async function syncToDatabase() {
-  const transaction = new sql.Transaction();
-
+  const employees = currentDocument.employees || {};
   try {
-    await transaction.begin();
-    const employees = currentDocument.employees;
-    try {
-      const deletedKeys = Object.entries(employees || {})
-        .filter(([k, v]) => v && String(v.Status ?? '').trim().toLowerCase() === 'deleted')
-        .map(([k]) => k);
-      console.log(`🧹 準備同步：總筆數=${Object.keys(employees||{}).length}，刪除標記=${deletedKeys.length} ->`, deletedKeys);
-    } catch {}
-
     for (const [employeeIdRaw, employee] of Object.entries(employees)) {
-      // 先過濾掉 new-/temp- key
       if (employeeIdRaw.startsWith('new-') || employeeIdRaw.startsWith('temp-')) {
         console.log('跳過臨時員工:', employeeIdRaw);
         continue;
       }
-
-      // 再轉數字 ID
       const employeeId = Number(employeeIdRaw);
-      if (isNaN(employeeId) || employeeId <= 0) {
+      if (!Number.isInteger(employeeId) || employeeId <= 0) {
         console.warn('跳過無效 ID:', employeeIdRaw);
         continue;
       }
 
-      // 刪除（狀態大小寫與空白容忍）
       const statusNorm = String(employee.Status ?? '').trim().toLowerCase();
       if (statusNorm === 'deleted') {
         console.log('準備刪除員工:', employeeId);
-        await transaction.request()
-          .input('EmployeeID', sql.Int, employeeId)
-          .query(`DELETE FROM [POC].[dbo].[Employee] WHERE EmployeeID = @EmployeeID`);
+        const { error: delErr } = await supabase
+          .from(EMP_TABLE)
+          .delete()
+          .eq('employee_id', employeeId);
+        if (delErr) throw delErr;
 
         currentDocument = Automerge.change(currentDocument, doc => {
           delete doc.employees[employeeIdRaw];
@@ -205,109 +175,28 @@ async function syncToDatabase() {
         continue;
       }
 
-      // 檢查是否存在
-      const check = await transaction.request()
-        .input('EmployeeID', sql.Int, employeeId)
-        .query(`SELECT COUNT(*) as count FROM [POC].[dbo].[Employee] WHERE EmployeeID = @EmployeeID`);
+      const payload = {
+        employee_id: employeeId,
+        first_name: String(employee.FirstName ?? ''),
+        last_name: String(employee.LastName ?? ''),
+        department: String(employee.Department ?? ''),
+        position: String(employee.Position ?? ''),
+        hire_date: employee.HireDate ? new Date(employee.HireDate) : null,
+        birth_date: employee.BirthDate ? new Date(employee.BirthDate) : null,
+        gender: String(employee.Gender ?? ''),
+        email: String(employee.Email ?? ''),
+        phone_number: String(employee.PhoneNumber ?? ''),
+        address: String(employee.Address ?? ''),
+        status: String(employee.Status ?? 'Active'),
+      };
 
-      if (check.recordset[0].count > 0) {
-        // 更新
-        console.log('更新員工:', employeeId);
-        const toJsDateOrNull = (v) => {
-          if (!v) return null;
-          const d = new Date(v);
-          return isNaN(d.getTime()) ? null : d;
-        };
-        const safe = {
-          FirstName: String(employee.FirstName ?? ''),
-          LastName: String(employee.LastName ?? ''),
-          Department: String(employee.Department ?? ''),
-          Position: String(employee.Position ?? ''),
-          HireDate: toJsDateOrNull(employee.HireDate),
-          BirthDate: toJsDateOrNull(employee.BirthDate),
-          Gender: String(employee.Gender ?? ''),
-          Email: String(employee.Email ?? ''),
-          PhoneNumber: String(employee.PhoneNumber ?? ''),
-          Address: String(employee.Address ?? ''),
-          Status: String(employee.Status ?? '在職'),
-        };
-        await transaction.request()
-          .input('EmployeeID', sql.Int, employeeId)
-          .input('FirstName', sql.NVarChar, safe.FirstName)
-          .input('LastName', sql.NVarChar, safe.LastName)
-          .input('Department', sql.NVarChar, safe.Department)
-          .input('Position', sql.NVarChar, safe.Position)
-          .input('HireDate', sql.Date, safe.HireDate)
-          .input('BirthDate', sql.Date, safe.BirthDate)
-          .input('Gender', sql.NVarChar, safe.Gender)
-          .input('Email', sql.NVarChar, safe.Email)
-          .input('PhoneNumber', sql.NVarChar, safe.PhoneNumber)
-          .input('Address', sql.NVarChar, safe.Address)
-          .input('Status', sql.NVarChar, safe.Status)
-          .query(`
-            UPDATE [POC].[dbo].[Employee] SET
-              FirstName=@FirstName,
-              LastName=@LastName,
-              Department=@Department,
-              Position=@Position,
-              HireDate=@HireDate,
-              BirthDate=@BirthDate,
-              Gender=@Gender,
-              Email=@Email,
-              PhoneNumber=@PhoneNumber,
-              Address=@Address,
-              Status=@Status
-            WHERE EmployeeID=@EmployeeID
-          `);
-      } else {
-        // 插入（注意：EmployeeID 不手動指定）
-        console.log('插入新員工:', employeeId);
-        const toJsDateOrNull = (v) => {
-          if (!v) return null;
-          const d = new Date(v);
-          return isNaN(d.getTime()) ? null : d;
-        };
-        const safeIns = {
-          FirstName: String(employee.FirstName ?? ''),
-          LastName: String(employee.LastName ?? ''),
-          Department: String(employee.Department ?? ''),
-          Position: String(employee.Position ?? ''),
-          HireDate: toJsDateOrNull(employee.HireDate),
-          BirthDate: toJsDateOrNull(employee.BirthDate),
-          Gender: String(employee.Gender ?? ''),
-          Email: String(employee.Email ?? ''),
-          PhoneNumber: String(employee.PhoneNumber ?? ''),
-          Address: String(employee.Address ?? ''),
-          Status: String(employee.Status ?? '在職'),
-        };
-        await transaction.request()
-          .input('FirstName', sql.NVarChar, safeIns.FirstName)
-          .input('LastName', sql.NVarChar, safeIns.LastName)
-          .input('Department', sql.NVarChar, safeIns.Department)
-          .input('Position', sql.NVarChar, safeIns.Position)
-          .input('HireDate', sql.Date, safeIns.HireDate)
-          .input('BirthDate', sql.Date, safeIns.BirthDate)
-          .input('Gender', sql.NVarChar, safeIns.Gender)
-          .input('Email', sql.NVarChar, safeIns.Email)
-          .input('PhoneNumber', sql.NVarChar, safeIns.PhoneNumber)
-          .input('Address', sql.NVarChar, safeIns.Address)
-          .input('Status', sql.NVarChar, safeIns.Status)
-          .query(`
-            INSERT INTO [POC].[dbo].[Employee] (
-              FirstName, LastName, Department, Position,
-              HireDate, BirthDate, Gender, Email, PhoneNumber, Address, Status
-            ) VALUES (
-              @FirstName, @LastName, @Department, @Position,
-              @HireDate, @BirthDate, @Gender, @Email, @PhoneNumber, @Address, @Status
-            )
-          `);
-      }
+      const { error: upsertErr } = await supabase
+        .from(EMP_TABLE)
+        .upsert(payload, { onConflict: 'employee_id' });
+      if (upsertErr) throw upsertErr;
     }
-
-    await transaction.commit();
     console.log('✅ Database synchronized successfully');
   } catch (err) {
-    await transaction.rollback();
     console.error('❌ Database sync failed:', err);
     throw err;
   }
@@ -323,9 +212,11 @@ app.get('/api/health', async (req, res) => {
   let dbConnected = false;
   let dbError = null;
   try {
-    const pool = await sql.connect(dbConfig);
-    const r = await pool.request().query('SELECT 1 AS ok');
-    dbConnected = Array.isArray(r?.recordset) && r.recordset.length > 0;
+    const { error } = await supabase
+      .from(EMP_TABLE)
+      .select('employee_id', { count: 'exact', head: true })
+      .limit(1);
+    dbConnected = !error;
   } catch (e) {
     dbError = e?.message || String(e);
   }
@@ -414,18 +305,31 @@ app.post('/api/sync/document', async (req, res) => {
 app.get('/api/employees', async (req, res) => {
   try {
     console.log('API: 正在執行員工查詢...');
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request().query(`
-      SELECT EmployeeID, FirstName, LastName, Department, Position, 
-             HireDate, BirthDate, Gender, Email, PhoneNumber, Address, Status
-      FROM [POC].[dbo].[Employee]
-      ORDER BY FirstName, LastName
-    `);
-    
-    console.log(`API: 查詢完成，找到 ${result.recordset.length} 名員工`);
-    console.log('API: 第一筆資料:', result.recordset[0] || 'No records');
-    
-    res.json(result.recordset);
+    const { data, error } = await supabase
+      .from(EMP_TABLE)
+      .select('employee_id, first_name, last_name, department, position, hire_date, birth_date, gender, email, phone_number, address, status')
+      .order('first_name', { ascending: true })
+      .order('last_name', { ascending: true });
+    if (error) throw error;
+
+    const mapped = (data || []).map((r) => ({
+      EmployeeID: r.employee_id,
+      FirstName: r.first_name || '',
+      LastName: r.last_name || '',
+      Department: r.department || '',
+      Position: r.position || '',
+      HireDate: r.hire_date ? new Date(r.hire_date).toISOString().split('T')[0] : '',
+      BirthDate: r.birth_date ? new Date(r.birth_date).toISOString().split('T')[0] : '',
+      Gender: r.gender || '',
+      Email: r.email || '',
+      PhoneNumber: r.phone_number || '',
+      Address: r.address || '',
+      Status: r.status || 'Active',
+    }));
+
+    console.log(`API: 查詢完成，找到 ${mapped.length} 名員工`);
+    console.log('API: 第一筆資料:', mapped[0] || 'No records');
+    res.json(mapped);
   } catch (err) {
     console.error('Failed to fetch employees:', err);
     console.error('API 錯誤詳情:', err.message);
@@ -458,74 +362,54 @@ app.get('/api/employees', async (req, res) => {
 app.post('/api/employees', async (req, res) => {
   try {
     console.log('POST /api/employees - 收到請求:', req.body);
-    
     const employee = req.body;
-    
-    // 基本驗證
     if (!employee.FirstName || !employee.LastName) {
-      return res.status(400).json({ 
-        error: 'FirstName and LastName are required' 
-      });
+      return res.status(400).json({ error: 'FirstName and LastName are required' });
     }
-    
-    console.log('準備插入員工資料:', employee);
-    
-    // 使用參數化查詢來防止 SQL 注入
+
     const sanitized = sanitizeEmployee(employee);
-    const request = new sql.Request();
-    const result = await request
-      .input('FirstName', sql.NVarChar, sanitized.FirstName)
-      .input('LastName', sql.NVarChar, sanitized.LastName)
-      .input('Department', sql.NVarChar, sanitized.Department)
-      .input('Position', sql.NVarChar, sanitized.Position)
-      .input('HireDate', sql.Date, sanitized.HireDate)
-      .input('BirthDate', sql.Date, sanitized.BirthDate)
-      .input('Gender', sql.NVarChar, sanitized.Gender)
-      .input('Email', sql.NVarChar, sanitized.Email)
-      .input('PhoneNumber', sql.NVarChar, sanitized.PhoneNumber)
-      .input('Address', sql.NVarChar, sanitized.Address)
-      .input('Status', sql.NVarChar, sanitized.Status)
-      .query(`
-        INSERT INTO [POC].[dbo].[Employee] (
-          FirstName, LastName, Department, Position,
-          HireDate, BirthDate, Gender, Email, PhoneNumber, Address, Status
-        )
-        OUTPUT INSERTED.EmployeeID
-        VALUES (
-          @FirstName, @LastName, @Department, @Position,
-          @HireDate, @BirthDate, @Gender, @Email, @PhoneNumber, @Address, @Status
-        )
-      `);
-    
-    console.log('SQL 插入成功:', result);
-    
-    // 取得自動生成的 EmployeeID
-    const employeeId = result.recordset[0].EmployeeID;
-    console.log('新生成的 EmployeeID:', employeeId);
-    
-    const newEmployee = {
-      EmployeeID: employeeId,
-      FirstName: employee.FirstName || '',
-      LastName: employee.LastName || '',
-      Department: employee.Department || '',
-      Position: employee.Position || '',
-      HireDate: employee.HireDate || null,
-      BirthDate: employee.BirthDate || null,
-      Gender: employee.Gender || '',
-      Email: employee.Email || '',
-      PhoneNumber: employee.PhoneNumber || '',
-      Address: employee.Address || '',
-      Status: employee.Status || 'Active'
+    const payload = {
+      first_name: sanitized.FirstName,
+      last_name: sanitized.LastName,
+      department: sanitized.Department,
+      position: sanitized.Position,
+      hire_date: sanitized.HireDate,
+      birth_date: sanitized.BirthDate,
+      gender: sanitized.Gender,
+      email: sanitized.Email,
+      phone_number: sanitized.PhoneNumber,
+      address: sanitized.Address,
+      status: sanitized.Status,
     };
-    
-    // 更新 CRDT 文檔
+
+    const { data, error } = await supabase
+      .from(EMP_TABLE)
+      .insert(payload)
+      .select('employee_id, first_name, last_name, department, position, hire_date, birth_date, gender, email, phone_number, address, status')
+      .single();
+    if (error) throw error;
+
+    const newEmployee = {
+      EmployeeID: data.employee_id,
+      FirstName: data.first_name || '',
+      LastName: data.last_name || '',
+      Department: data.department || '',
+      Position: data.position || '',
+      HireDate: data.hire_date ? new Date(data.hire_date).toISOString().split('T')[0] : '',
+      BirthDate: data.birth_date ? new Date(data.birth_date).toISOString().split('T')[0] : '',
+      Gender: data.gender || '',
+      Email: data.email || '',
+      PhoneNumber: data.phone_number || '',
+      Address: data.address || '',
+      Status: data.status || 'Active'
+    };
+
     currentDocument = Automerge.change(currentDocument, doc => {
-      doc.employees[employeeId] = newEmployee;
+      doc.employees[String(newEmployee.EmployeeID)] = newEmployee;
       doc.lastModified = Date.now();
     });
-    
+
     console.log('CRDT 文檔已更新');
-    
     res.json({ success: true, employee: newEmployee });
   } catch (err) {
     console.error('Failed to create employee:', err);
@@ -536,70 +420,54 @@ app.post('/api/employees', async (req, res) => {
 // 更新員工（傳統 REST API）
 app.put('/api/employees/:id', async (req, res) => {
   try {
-    const employeeId = req.params.id;
+    const employeeId = Number(req.params.id);
     const employee = req.body;
     
     console.log('PUT /api/employees/:id - 收到請求:', { employeeId, employee });
     
-    // 基本驗證
     if (!employee.FirstName || !employee.LastName) {
-      return res.status(400).json({ 
-        error: 'FirstName and LastName are required' 
-      });
+      return res.status(400).json({ error: 'FirstName and LastName are required' });
     }
     
-    // 使用參數化查詢來防止 SQL 注入
     const sanitized = sanitizeEmployee(employee);
-    const request = new sql.Request();
-    const result = await request
-      .input('EmployeeID', sql.Int, employeeId)
-      .input('FirstName', sql.NVarChar, sanitized.FirstName)
-      .input('LastName', sql.NVarChar, sanitized.LastName)
-      .input('Department', sql.NVarChar, sanitized.Department)
-      .input('Position', sql.NVarChar, sanitized.Position)
-      .input('HireDate', sql.Date, sanitized.HireDate)
-      .input('BirthDate', sql.Date, sanitized.BirthDate)
-      .input('Gender', sql.NVarChar, sanitized.Gender)
-      .input('Email', sql.NVarChar, sanitized.Email)
-      .input('PhoneNumber', sql.NVarChar, sanitized.PhoneNumber)
-      .input('Address', sql.NVarChar, sanitized.Address)
-      .input('Status', sql.NVarChar, sanitized.Status)
-      .query(`
-        UPDATE [POC].[dbo].[Employee] SET
-          FirstName = @FirstName,
-          LastName = @LastName,
-          Department = @Department,
-          Position = @Position,
-          HireDate = @HireDate,
-          BirthDate = @BirthDate,
-          Gender = @Gender,
-          Email = @Email,
-          PhoneNumber = @PhoneNumber,
-          Address = @Address,
-          Status = @Status
-        WHERE EmployeeID = @EmployeeID
-      `);
-    
-    console.log('SQL 更新成功:', result);
-    
+    const payload = {
+      first_name: sanitized.FirstName,
+      last_name: sanitized.LastName,
+      department: sanitized.Department,
+      position: sanitized.Position,
+      hire_date: sanitized.HireDate,
+      birth_date: sanitized.BirthDate,
+      gender: sanitized.Gender,
+      email: sanitized.Email,
+      phone_number: sanitized.PhoneNumber,
+      address: sanitized.Address,
+      status: sanitized.Status,
+    };
+    const { data, error } = await supabase
+      .from(EMP_TABLE)
+      .update(payload)
+      .eq('employee_id', employeeId)
+      .select('employee_id, first_name, last_name, department, position, hire_date, birth_date, gender, email, phone_number, address, status')
+      .single();
+    if (error) throw error;
+
     const updatedEmployee = {
-      EmployeeID: employeeId,
-      FirstName: employee.FirstName || '',
-      LastName: employee.LastName || '',
-      Department: employee.Department || '',
-      Position: employee.Position || '',
-      HireDate: employee.HireDate || null,
-      BirthDate: employee.BirthDate || null,
-      Gender: employee.Gender || '',
-      Email: employee.Email || '',
-      PhoneNumber: employee.PhoneNumber || '',
-      Address: employee.Address || '',
-      Status: employee.Status || '在職'
+      EmployeeID: data.employee_id,
+      FirstName: data.first_name || '',
+      LastName: data.last_name || '',
+      Department: data.department || '',
+      Position: data.position || '',
+      HireDate: data.hire_date ? new Date(data.hire_date).toISOString().split('T')[0] : '',
+      BirthDate: data.birth_date ? new Date(data.birth_date).toISOString().split('T')[0] : '',
+      Gender: data.gender || '',
+      Email: data.email || '',
+      PhoneNumber: data.phone_number || '',
+      Address: data.address || '',
+      Status: data.status || 'Active'
     };
     
-    // 更新 CRDT 文檔
     currentDocument = Automerge.change(currentDocument, doc => {
-      doc.employees[employeeId] = updatedEmployee;
+      doc.employees[String(employeeId)] = updatedEmployee;
       doc.lastModified = Date.now();
     });
     
@@ -615,21 +483,18 @@ app.put('/api/employees/:id', async (req, res) => {
 // 刪除員工（傳統 REST API）
 app.delete('/api/employees/:id', async (req, res) => {
   try {
-    const employeeId = req.params.id;
+    const employeeId = Number(req.params.id);
     
     console.log('DELETE /api/employees/:id - 收到請求:', { employeeId });
-    
-    // 使用參數化查詢來防止 SQL 注入
-    const request = new sql.Request();
-    const result = await request
-      .input('EmployeeID', sql.Int, employeeId)
-      .query(`DELETE FROM [POC].[dbo].[Employee] WHERE EmployeeID = @EmployeeID`);
-    
-    console.log('SQL 刪除成功:', result);
-    
-    // 更新 CRDT 文檔
+
+    const { error } = await supabase
+      .from(EMP_TABLE)
+      .delete()
+      .eq('employee_id', employeeId);
+    if (error) throw error;
+
     currentDocument = Automerge.change(currentDocument, doc => {
-      delete doc.employees[employeeId];
+      delete doc.employees[String(employeeId)];
       doc.lastModified = Date.now();
     });
     
@@ -660,56 +525,48 @@ async function processOfflineEmployees() {
   
   console.log('發現離線新增的員工:', newEmployees.length, '個');
   
-  // 為每個新員工生成真實 ID 並插入資料庫
+  // 為每個新員工生成真實 ID 並插入資料庫（改用 Supabase）
   for (const { key, employee } of newEmployees) {
     try {
       const sanitized = sanitizeEmployee(employee);
+      const payload = {
+        first_name: sanitized.FirstName,
+        last_name: sanitized.LastName,
+        department: sanitized.Department,
+        position: sanitized.Position,
+        hire_date: sanitized.HireDate,
+        birth_date: sanitized.BirthDate,
+        gender: sanitized.Gender,
+        email: sanitized.Email,
+        phone_number: sanitized.PhoneNumber,
+        address: sanitized.Address,
+        status: sanitized.Status,
+      };
+      const { data, error } = await supabase
+        .from(EMP_TABLE)
+        .insert(payload)
+        .select('employee_id, first_name, last_name, department, position, hire_date, birth_date, gender, email, phone_number, address, status')
+        .single();
+      if (error) throw error;
 
-      // 使用參數化查詢插入新員工
-      const request = new sql.Request();
-      const result = await request
-        .input('FirstName', sql.NVarChar, sanitized.FirstName)
-        .input('LastName', sql.NVarChar, sanitized.LastName)
-        .input('Department', sql.NVarChar, sanitized.Department)
-        .input('Position', sql.NVarChar, sanitized.Position)
-        .input('HireDate', sql.Date, sanitized.HireDate)
-        .input('BirthDate', sql.Date, sanitized.BirthDate)
-        .input('Gender', sql.NVarChar, sanitized.Gender)
-        .input('Email', sql.NVarChar, sanitized.Email)
-        .input('PhoneNumber', sql.NVarChar, sanitized.PhoneNumber)
-        .input('Address', sql.NVarChar, sanitized.Address)
-        .input('Status', sql.NVarChar, sanitized.Status)
-        .query(`
-          INSERT INTO [POC].[dbo].[Employee] (
-            FirstName, LastName, Department, Position,
-            HireDate, BirthDate, Gender, Email, PhoneNumber, Address, Status
-          )
-          OUTPUT INSERTED.EmployeeID
-          VALUES (
-            @FirstName, @LastName, @Department, @Position,
-            @HireDate, @BirthDate, @Gender, @Email, @PhoneNumber, @Address, @Status
-          )
-        `);
-
-      const newEmployeeId = result.recordset[0].EmployeeID;
+      const newEmployeeId = data.employee_id;
       console.log('離線員工已插入，新 ID:', newEmployeeId, '原鍵:', key);
       
       // 更新 CRDT 文檔，將臨時鍵替換為真實 ID
       currentDocument = Automerge.change(currentDocument, doc => {
-        // 建立新物件，避免引用同一個 existing object 觸發 Automerge RangeError
         const updatedEmployee = {
-          EmployeeID: newEmployeeId,
-          FirstName: String(employee.FirstName || ''),
-          LastName: String(employee.LastName || ''),
-          Department: String(employee.Department || ''),
-          Position: String(employee.Position || ''),
-          HireDate: employee.HireDate || null,
-          BirthDate: employee.BirthDate || null,
-          Gender: String(employee.Gender || ''),
-          Email: String(employee.Email || ''),
-          PhoneNumber: String(employee.PhoneNumber || ''),
-          Address: String(employee.Address || ''),
-          Status: String(employee.Status || 'Active')
+          EmployeeID: data.employee_id,
+          FirstName: data.first_name || '',
+          LastName: data.last_name || '',
+          Department: data.department || '',
+          Position: data.position || '',
+          HireDate: data.hire_date ? new Date(data.hire_date).toISOString().split('T')[0] : '',
+          BirthDate: data.birth_date ? new Date(data.birth_date).toISOString().split('T')[0] : '',
+          Gender: data.gender || '',
+          Email: data.email || '',
+          PhoneNumber: data.phone_number || '',
+          Address: data.address || '',
+          Status: data.status || 'Active'
         };
         delete doc.employees[key];
         doc.employees[String(newEmployeeId)] = updatedEmployee;
@@ -736,6 +593,5 @@ app.listen(PORT, async () => {
 // 優雅關閉
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully...');
-  await sql.close();
   process.exit(0);
 }); 
