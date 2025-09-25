@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 3001;
 // 中間件
 app.use(cors({
   origin: [
-    'https://pwa-employee.vercel.app', // 實際 Vercel 前端域名
+    'https://poc-pwa-2-nine.vercel.app', // 實際 Vercel 前端域名
     'http://localhost:9000',
     'http://localhost:9200'
   ],
