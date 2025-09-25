@@ -133,16 +133,16 @@
 
     <!-- 新增/編輯員工資料 -->
     <q-dialog v-model="showDialog" persistent>
-      <q-card style="min-width: 500px; max-width: 600px">
+      <q-card class="employee-dialog-card" :style="isSmall ? 'width: 100%; max-width: 100%;' : 'min-width: 500px; max-width: 600px'">
         <q-card-section class="row items-center q-pb-none">
           <div class="text-h6">{{ isEditing ? '編輯員工' : '新增員工' }}</div>
           <q-space />
           <q-btn v-close-popup icon="close" flat round dense />
         </q-card-section>
 
-        <q-card-section class="q-pt-none">
+        <q-card-section class="q-pt-none dialog-main">
           <div class="row q-gutter-sm">
-            <div class="col-5">
+            <div class="col-12 col-sm-6">
               <q-input
                 v-model="currentEmployee.FirstName"
                 label="名 *"
@@ -151,7 +151,7 @@
                 :rules="[val => !!val || '必填欄位']"
               />
             </div>
-            <div class="col-5">
+            <div class="col-12 col-sm-6">
               <q-input
                 v-model="currentEmployee.LastName"
                 label="姓 *"
@@ -163,7 +163,7 @@
           </div>
 
           <div class="row q-gutter-sm q-mt-sm">
-            <div class="col-5">
+            <div class="col-12 col-sm-6">
               <q-input
                 v-model="currentEmployee.Department"
                 label="部門"
@@ -171,7 +171,7 @@
                 dense
               />
             </div>
-            <div class="col-5">
+            <div class="col-12 col-sm-6">
               <q-input
                 v-model="currentEmployee.Position"
                 label="職位"
@@ -182,7 +182,7 @@
           </div>
 
           <div class="row q-gutter-sm q-mt-sm">
-            <div class="col-5">
+            <div class="col-12 col-sm-6">
               <q-input
                 v-model="currentEmployee.Email"
                 label="電子郵件"
@@ -191,7 +191,7 @@
                 dense
               />
             </div>
-            <div class="col-5">
+            <div class="col-12 col-sm-6">
               <q-input
                 v-model="currentEmployee.PhoneNumber"
                 label="電話號碼"
@@ -202,7 +202,7 @@
           </div>
 
           <div class="row q-gutter-sm q-mt-sm">
-            <div class="col-5">
+            <div class="col-12 col-sm-6">
               <q-select
                 v-model="currentEmployee.Gender"
                 :options="genderOptions"
@@ -216,7 +216,7 @@
                 clearable
               />
             </div>
-            <div class="col-5">
+            <div class="col-12 col-sm-6">
               <q-select
                 v-model="currentEmployee.Status"
                 :options="statusOptions"
@@ -232,7 +232,7 @@
           </div>
 
           <div class="row q-gutter-sm q-mt-sm">
-            <div class="col-5">
+            <div class="col-12 col-sm-6">
               <q-input
                 v-model="currentEmployee.HireDate"
                 label="到職日期"
@@ -241,7 +241,7 @@
                 dense
               />
             </div>
-            <div class="col-5">
+            <div class="col-12 col-sm-6">
               <q-input
                 v-model="currentEmployee.BirthDate"
                 label="生日"
@@ -264,7 +264,7 @@
           </div>
         </q-card-section>
 
-        <q-card-actions align="right" class="q-pa-md">
+        <q-card-actions align="right" class="q-pa-md mobile-actions">
           <q-btn flat label="取消" @click="closeDialog" />
           <q-btn 
             color="primary" 
@@ -322,6 +322,7 @@ const API_BASE = (() => {
 })();
 
 const $q = useQuasar();
+const isSmall = computed(() => window.matchMedia('(max-width: 768px)').matches);
 
 // 安全的通知函數
 const notify = (type: 'positive' | 'negative' | 'warning' | 'info', message: string) => {
@@ -880,6 +881,14 @@ onMounted(async () => {
   height: 100%;
 }
 
+/* 表頭 sticky，行動裝置更易編輯 */
+.employee-table thead tr th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: white;
+}
+
 .search-input {
   max-width: 400px;
 }
@@ -890,6 +899,20 @@ onMounted(async () => {
 
 /* 響應式設計 */
 @media (max-width: 768px) {
+  /* 對話框在手機：滿版並留出安全邊距 */
+  .employee-dialog-card {
+    height: 100vh;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .dialog-main {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    max-height: calc(100vh - 120px);
+  }
+
   .action-bar .row {
     flex-direction: column;
     gap: 12px;
@@ -901,6 +924,23 @@ onMounted(async () => {
   
   .search-input {
     max-width: none;
+  }
+
+  /* 行動裝置：表格容器允許橫向滾動，增加間距與點擊空間 */
+  .table-container {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .employee-table :deep(.q-td),
+  .employee-table :deep(.q-th) {
+    padding: 12px 10px;
+    font-size: 14px;
+  }
+
+  /* 對話框底部操作列在手機更容易點擊 */
+  .mobile-actions .q-btn {
+    min-width: 96px;
   }
 }
 </style> 

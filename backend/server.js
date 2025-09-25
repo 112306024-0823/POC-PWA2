@@ -118,7 +118,7 @@ async function loadExistingData() {
       .from(EMP_TABLE)
       .select('employee_id, first_name, last_name, department, position, hire_date, birth_date, gender, email, phone_number, address, status');
     if (error) throw error;
-
+    
     currentDocument = Automerge.change(currentDocument, doc => {
       (data || []).forEach(row => {
         doc.employees[row.employee_id] = {
@@ -138,7 +138,7 @@ async function loadExistingData() {
       });
       doc.lastModified = Date.now();
     });
-
+    
     console.log(`Loaded ${Array.isArray(data) ? data.length : 0} employees into CRDT document`);
   } catch (err) {
     console.error('Failed to load existing data:', err);
@@ -366,7 +366,7 @@ app.post('/api/employees', async (req, res) => {
     if (!employee.FirstName || !employee.LastName) {
       return res.status(400).json({ error: 'FirstName and LastName are required' });
     }
-
+    
     const sanitized = sanitizeEmployee(employee);
     const payload = {
       first_name: sanitized.FirstName,
@@ -388,7 +388,7 @@ app.post('/api/employees', async (req, res) => {
       .select('employee_id, first_name, last_name, department, position, hire_date, birth_date, gender, email, phone_number, address, status')
       .single();
     if (error) throw error;
-
+    
     const newEmployee = {
       EmployeeID: data.employee_id,
       FirstName: data.first_name || '',
@@ -408,7 +408,7 @@ app.post('/api/employees', async (req, res) => {
       doc.employees[String(newEmployee.EmployeeID)] = newEmployee;
       doc.lastModified = Date.now();
     });
-
+    
     console.log('CRDT 文檔已更新');
     res.json({ success: true, employee: newEmployee });
   } catch (err) {
@@ -450,7 +450,7 @@ app.put('/api/employees/:id', async (req, res) => {
       .select('employee_id, first_name, last_name, department, position, hire_date, birth_date, gender, email, phone_number, address, status')
       .single();
     if (error) throw error;
-
+    
     const updatedEmployee = {
       EmployeeID: data.employee_id,
       FirstName: data.first_name || '',
@@ -486,7 +486,7 @@ app.delete('/api/employees/:id', async (req, res) => {
     const employeeId = Number(req.params.id);
     
     console.log('DELETE /api/employees/:id - 收到請求:', { employeeId });
-
+    
     const { error } = await supabase
       .from(EMP_TABLE)
       .delete()
